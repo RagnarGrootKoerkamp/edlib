@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <climits>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,18 +26,17 @@ void printSeq(const vector<char>& seq) {
 	printf("\n");
 }
 
-void readSequences(const char* path, vector<vector<char>>* queries, vector<vector<char>>* targets) {
-	std::ifstream file(path);
-	std::string line;
-	while(file >> line) {
-		vector<char> seq(line.begin() + 1, line.end());
-		if(line[0] == '>') {
-			queries->push_back(std::move(seq));
-		} else {
-			assert(line[0] == '<');
-			targets->push_back(std::move(seq));
-		}
-	}
+// Copied from WFA
+bool read_input(FILE* input_file, char** line1, char** line2, int* line1_length,
+                int* line2_length) {
+	// Parameters
+	size_t allocated1 = 0, allocated2 = 0;
+	// Read queries
+	*line1_length = getline(line1, &allocated1, input_file);
+	if(*line1_length == -1) return false;
+	*line2_length = getline(line2, &allocated2, input_file);
+	if(*line2_length == -1) return false;
+	return true;
 }
 
 int main(int argc, char* const argv[]) {
@@ -135,181 +135,38 @@ int main(int argc, char* const argv[]) {
 
 	// int readResult;
 	//  Read queries
-	char* queriesFilepath                 = argv[optind];
-	vector<vector<char>>* querySequences  = new vector<vector<char>>();
-	vector<vector<char>>* targetSequences = new vector<vector<char>>();
-	// printf("Reading queries...\n");
-	// readResult = readFastaSequences(queriesFilepath, querySequences);
-	// if(readResult) {
-	// 	printf("Error: There is no file with name %s\n", queriesFilepath);
-	// 	delete querySequences;
-	// 	return 1;
-	// }
-	readSequences(queriesFilepath, querySequences, targetSequences);
-	int numQueries         = querySequences->size();
-	int numTargets         = targetSequences->size();
-	int queriesTotalLength = 0;
-	for(int i = 0; i < numQueries; i++) {
-		queriesTotalLength += (*querySequences)[i].size();
-	}
-	int targetsTotalLength = 0;
-	for(int i = 0; i < numTargets; i++) {
-		targetsTotalLength += (*targetSequences)[i].size();
-	}
+	char* queriesFilepath = argv[optind];
 
-	// // Read target
-	// char* targetFilepath                  = argv[optind + 1];
-	// printf("Reading target fasta file...\n");
-	// readResult = readFastaSequences(targetFilepath, targetSequences);
-	// if(readResult) {
-	// 	printf("Error: There is no file with name %s\n", targetFilepath);
-	// 	delete querySequences;
-	// 	delete targetSequences;
-	// 	return 1;
-	// }
-
-	printf("Read %d queries, %d residues total.\n", numQueries, queriesTotalLength);
-	printf("Read %d targets, %d residues total.\n", numTargets, targetsTotalLength);
-	// char* target = (*targetSequences)[0].data();
-	// int targetLength = (*targetSequences)[0].size();
-	// printf("Read target, %d residues.\n", targetLength);
-
-	assert(numQueries == numTargets);
+	FILE* file = fopen(queriesFilepath, "r");
 
 	// ----------------------------- MAIN CALCULATION ----------------------------- //
 	printf("\nComparing queries to target...\n");
-	int* scores          = new int[numQueries];
-	int** endLocations   = new int*[numQueries];
-	int** startLocations = new int*[numQueries];
-	int* numLocations    = new int[numQueries];
-	priority_queue<int> bestScores; // Contains numBestSeqs best scores
 	int k                    = kArg;
 	unsigned char* alignment = NULL;
 	int alignmentLength;
 	clock_t start = clock();
 
-	if(!findAlignment || silent) {
-		printf("0/%d", numQueries);
-		fflush(stdout);
-	}
-	for(int i = 0; i < numQueries; i++) {
-		char* query      = (*querySequences)[i].data();
-		int queryLength  = (*querySequences)[i].size();
-		char* target     = (*targetSequences)[i].data();
-		int targetLength = (*targetSequences)[i].size();
-
+	char* query;
+	int queryLength;
+	char* target;
+	int targetLength;
+	while(read_input(file, &query, &target, &queryLength, &targetLength)) {
 		// Calculate score
 		EdlibAlignResult result;
 		for(int rep = 0; rep < numRepeats;
 		    rep++) { // Redundant repetition, for performance measurements.
-			result = edlibAlign(query, queryLength, target, targetLength,
+			result = edlibAlign(query + 1, queryLength - 1, target + 1, targetLength - 1,
 			                    edlibNewAlignConfig(k, modeCode, alignTask, NULL, 0));
-			if(rep < numRepeats - 1) edlibFreeAlignResult(result);
+			edlibFreeAlignResult(result);
 		}
-
-		scores[i]         = result.editDistance;
-		endLocations[i]   = result.endLocations;
-		startLocations[i] = result.startLocations;
-		numLocations[i]   = result.numLocations;
-		alignment         = result.alignment;
-		alignmentLength   = result.alignmentLength;
-
-		// If we want only numBestSeqs best sequences, update best scores
-		// and adjust k to largest score.
-		if(numBestSeqs > 0) {
-			if(scores[i] >= 0) {
-				bestScores.push(scores[i]);
-				if(static_cast<int>(bestScores.size()) > numBestSeqs) {
-					bestScores.pop();
-				}
-				if(static_cast<int>(bestScores.size()) == numBestSeqs) {
-					k = bestScores.top() - 1;
-					if(kArg >= 0 && kArg < k) k = kArg;
-				}
-			}
-		}
-
-		if(!findAlignment || silent) {
-			printf("\r%d/%d", i + 1, numQueries);
-			fflush(stdout);
-		} else {
-			// Print alignment if it was found, use first position
-			if(alignment) {
-				printf("\n");
-				printf("Query #%d (%d residues): score = %d\n", i, queryLength, scores[i]);
-				if(!strcmp(alignmentFormat, "NICE")) {
-					printAlignment(query, target, alignment, alignmentLength, *(endLocations[i]),
-					               modeCode);
-				} else {
-					printf("Cigar:\n");
-					EdlibCigarFormat cigarFormat = !strcmp(alignmentFormat, "CIG_STD")
-					                                   ? EDLIB_CIGAR_STANDARD
-					                                   : EDLIB_CIGAR_EXTENDED;
-					char* cigar = edlibAlignmentToCigar(alignment, alignmentLength, cigarFormat);
-					if(cigar) {
-						printf("%s\n", cigar);
-						free(cigar);
-					} else {
-						printf("Error while printing cigar!\n");
-					}
-				}
-			}
-		}
-
-		if(alignment) free(alignment);
-	}
-
-	if(!silent && !findAlignment) {
-		int scoreLimit =
-		    -1; // Only scores <= then scoreLimit will be printed (we consider -1 as infinity)
-		printf("\n");
-
-		if(bestScores.size() > 0) {
-			printf("%d best scores:\n", static_cast<int>(bestScores.size()));
-			scoreLimit = bestScores.top();
-		} else {
-			printf("Scores:\n");
-		}
-
-		printf("<query number>: <score>, <num_locations>, "
-		       "[(<start_location_in_target>, <end_location_in_target>)]\n");
-		for(int i = 0; i < numQueries; i++) {
-			if(scores[i] > -1 && (scoreLimit == -1 || scores[i] <= scoreLimit)) {
-				printf("#%d: %d  %d", i, scores[i], numLocations[i]);
-				if(numLocations[i] > 0) {
-					printf("  [");
-					for(int j = 0; j < numLocations[i]; j++) {
-						printf(" (");
-						if(startLocations[i]) {
-							printf("%d", *(startLocations[i] + j));
-						} else {
-							printf("?");
-						}
-						printf(", %d)", *(endLocations[i] + j));
-					}
-					printf(" ]");
-				}
-				printf("\n");
-			}
-		}
+		free(query);
+		free(target);
 	}
 
 	clock_t finish = clock();
 	double cpuTime = static_cast<double>(finish - start) / CLOCKS_PER_SEC;
 	printf("\nCpu time of searching: %lf\n", cpuTime);
 	// ---------------------------------------------------------------------------- //
-
-	// Free allocated space
-	for(int i = 0; i < numQueries; i++) {
-		free(endLocations[i]);
-		if(startLocations[i]) free(startLocations[i]);
-	}
-	delete[] endLocations;
-	delete[] startLocations;
-	delete[] numLocations;
-	delete querySequences;
-	delete targetSequences;
-	delete[] scores;
 
 	return 0;
 }
